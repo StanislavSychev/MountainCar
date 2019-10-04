@@ -45,7 +45,6 @@ class Actor(nn.Module):
 
 
 class Memory:
-
     def __init__(self, size, sample_size):
         self.p = 0
         self.a = []
@@ -96,7 +95,8 @@ class Policy:
     def __init__(self, state_dim=2, hidden_actor=100,
                  hidden_action=30, hidden_state=70,
                  memory_size=10000, batch_size=50,
-                 eps=0.1, gamma=0.99, lr=5e-4):
+                 eps=0.1, gamma=0.99,
+                 alr=3e-4, clr=3e-3, tau=0.01):
         self.actor = Actor(state_dim, hidden_actor)
         self.critic = Critic(state_dim, hidden_action, hidden_state)
         self.t_actor = copy.deepcopy(self.actor)
@@ -104,15 +104,16 @@ class Policy:
         self.memory = Memory(memory_size, batch_size)
         self.gamma = gamma
         self.eps = eps
-        self.a_optim = optim.Adam(self.actor.parameters(), lr=lr)
-        self.c_optim = optim.Adam(self.critic.parameters(), lr=lr)
+        self.a_optim = optim.Adam(self.actor.parameters(), lr=alr)
+        self.c_optim = optim.Adam(self.critic.parameters(), lr=clr)
+        self.tau = tau
         self.loss = nn.MSELoss()
 
     def act_random(self, state):
         return np.array([random.uniform(-1, 1)])
 
     def act_best(self, state):
-        a = self.actor(Variable(torch.from_numpy(state).type(torch.FloatTensor)))
+        a = self.actor(torch.tensor(state).float())
         return np.array([a.item()])
 
     def act(self, state):
@@ -121,16 +122,23 @@ class Policy:
         return self.act_best(state)
 
     def memorize(self, st1, act, st2, rew, d):
-        st1 = Variable(torch.from_numpy(st1).type(torch.FloatTensor))
-        act = Variable(torch.from_numpy(act).type(torch.FloatTensor))
-        st2 = Variable(torch.from_numpy(st2).type(torch.FloatTensor))
+        st1 = torch.tensor(st1).float()
+        act = torch.tensor(act).float()
+        st2 = torch.tensor(st2).float()
         rew = torch.tensor([rew]).float()
-        d = torch.tensor([d])
+        d = torch.tensor([not d])
         self.memory.add(st1, act, st2, rew, d)
 
     def update(self):
-        self.t_actor = copy.deepcopy(self.actor)
-        self.t_critic = copy.deepcopy(self.critic)
+        # self.t_actor = copy.deepcopy(self.actor)
+        # self.t_critic = copy.deepcopy(self.critic)
+        self.soft_update(self.critic, self.t_critic, self.tau)
+        self.soft_update(self.actor, self.t_actor, self.tau)
+
+    @staticmethod
+    def soft_update(current, target, tau):
+        for curr_layer, target_layer in zip(current.parameters(), target.parameters()):
+            target_layer.data.copy_(tau * curr_layer + (1 - tau) * target_layer)
 
     def set_eps(self, eps):
         self.eps = eps
@@ -138,23 +146,23 @@ class Policy:
     def try_learn(self):
         if not self.memory.ready():
             return
-        self.c_optim.zero_grad()
-        self.a_optim.zero_grad()
         st, a, stp, r, d = self.memory.sample()
-        ap = self.actor(stp)
         tq = torch.zeros(d.size()).float()
         with torch.no_grad():
-            tq[d] = (self.gamma * self.t_critic(stp, ap))[d]
-        tq = tq + r
+            ap = self.t_actor(stp)
+            tq[d] = (self.gamma * self.t_critic(stp, ap.detach()))[d]
+            # tq = self.gamma * self.t_critic(stp, ap.detach())
+            tq = tq + r
         c_loss = self.loss(self.critic(st, a), tq)
+        # update critic
+        self.c_optim.zero_grad()
         c_loss.backward()
-        for param in self.critic.parameters():
-            param.grad.data.clamp_(-1, 1)
         self.c_optim.step()
         a_loss = - self.critic(st, self.actor(st)).mean()
+        # update actor
+        self.a_optim.zero_grad()
+        self.c_optim.zero_grad()
         a_loss.backward()
-        for param in self.actor.parameters():
-            param.grad.data.clamp_(-1, 1)
         self.a_optim.step()
 
     def visualize(self):
@@ -208,11 +216,11 @@ def train():
     render = False
     env = gym.make('MountainCarContinuous-v0')
     m = Policy(gamma=gamma)
-    m = Policy.load("mccv0")
+    # m = Policy.load("mccv0")
     m.set_eps(0.5)
     max_epoch = 100
-    eps_max = 0.5
-    eps_min = 0.01
+    eps_max = 0.2
+    eps_min = 0.1
     rr = []
     max_steps = 1500
     won = 0
@@ -241,9 +249,9 @@ def train():
         print("{}, {}: {}".format(i, won, r))
         rr.append(r)
     m.visualize()
-    Policy.save(m, "mccv0_1")
+    Policy.save(m, "mccv0_2")
 
 
 if __name__ == '__main__':
-    # train()
+    train()
     print(score())
